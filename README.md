@@ -2,28 +2,31 @@
 
 <!-- TOC -->
 
-- [StorageGRID Audit-log Converter SGAC](#storagegrid-audit-log-converter-sgac)
-    - [Run sgac.py and view its output](#run-sgacpy-and-view-its-output)
-        - [What to do with SGAC output](#what-to-do-with-sgac-output)
-        - [SGAC performance](#sgac-performance)
-    - [Additional information about StorageGRID audit log](#additional-information-about-storagegrid-audit-log)
-        - [How to get StorageGRID audit log](#how-to-get-storagegrid-audit-log)
-        - [Accessing audit logs](#accessing-audit-logs)
-        - [Sample StorageGRID audit log entry for S3 PUT](#sample-storagegrid-audit-log-entry-for-s3-put)
-        - [How to read audit messages](#how-to-read-audit-messages)
-        - [What if I'm just interested in S3 PUT/GET/DELETE to determine top users and such](#what-if-im-just-interested-in-s3-putgetdelete-to-determine-top-users-and-such)
-        - [Is there a list of all fields/keys for StorageGRID logs](#is-there-a-list-of-all-fieldskeys-for-storagegrid-logs)
-        - [How can one ensure that no audit log file is deleted before it's copied out of Admin Node](#how-can-one-ensure-that-no-audit-log-file-is-deleted-before-its-copied-out-of-admin-node)
-        - [Sample audit-explain output](#sample-audit-explain-output)
-        - [Sample audit-sum output](#sample-audit-sum-output)
-    - [Known issues](#known-issues)
-    - [Change Log](#change-log)
+- [StorageGRID Audit-log Converter (SGAC)](#storagegrid-audit-log-converter-sgac)
+  - [Run `sgac.py` and view its output](#run-sgacpy-and-view-its-output)
+    - [What to do with SGAC output](#what-to-do-with-sgac-output)
+    - [SGAC performance](#sgac-performance)
+  - [Additional information about StorageGRID audit log](#additional-information-about-storagegrid-audit-log)
+    - [How to get StorageGRID audit log](#how-to-get-storagegrid-audit-log)
+    - [Accessing audit logs](#accessing-audit-logs)
+    - [Sample StorageGRID audit log entry for S3 PUT](#sample-storagegrid-audit-log-entry-for-s3-put)
+    - [How to read audit messages](#how-to-read-audit-messages)
+    - [What if I'm just interested in S3 PUT/GET/DELETE to determine top users and such](#what-if-im-just-interested-in-s3-putgetdelete-to-determine-top-users-and-such)
+    - [Is there a list of all fields/keys for StorageGRID logs](#is-there-a-list-of-all-fieldskeys-for-storagegrid-logs)
+    - [How can one ensure that no audit log file is deleted before it's copied out of Admin Node](#how-can-one-ensure-that-no-audit-log-file-is-deleted-before-its-copied-out-of-admin-node)
+    - [Sample audit-explain output](#sample-audit-explain-output)
+    - [Sample audit-sum output](#sample-audit-sum-output)
+  - [Known issues](#known-issues)
+  - [Change Log](#change-log)
 
 <!-- /TOC -->
 
 ## Run `sgac.py` and view its output
 
-**NOTE:** users of StorageGRID 11.6 and above should check [audit log forwarding](https://scaleoutsean.github.io/2022/03/04/storagegrid-s3-select.html#storagegrid-log-forwarding) feature that appeared in 11.6. That link also explains why there's no SGAC for version 11.6 - you don't need to read and process logs - since 11.6 they can be [forwarded](https://docs.netapp.com/us-en/storagegrid-enable/tools-apps-guides/elk-instructions.html#instruction) to a syslog destination external to StorageGRID cluster.
+**NOTE:** 
+
+- users of StorageGRID 11.6 and above should check [audit log forwarding](https://scaleoutsean.github.io/2022/03/04/storagegrid-s3-select.html#storagegrid-log-forwarding) feature that appeared in 11.6. That link also explains why there's no SGAC for version 11.6 - you don't need to read and process logs - since 11.6 they can be [forwarded](https://docs.netapp.com/us-en/storagegrid-enable/tools-apps-guides/elk-instructions.html#instruction) to a syslog destination external to StorageGRID cluster.
+- post-11.6 versions of StorageGRID may have new or modified log entries which could easily break this script, so for >=11.6 it's recommended to use the built-in forwarding over this script
 
 Users of StorageGRID 11 (especially 11.0 to 11.5) can download StorageGRID 11 audit log file and convert it to JSON documents (one per event) like so:
 
