@@ -35,7 +35,7 @@ Users of StorageGRID 11 (especially 11.0 to 11.5) can download StorageGRID 11 au
 ./sgac.py /data/in/audit.log /data/out/sgac.json --log-format 11 --ignore-errors --validate-json
 ```
 
-Thanks to our numerous contributors, starting with v0.2.3 SGAC may work - to an extent - with StorageGRID audit logs from version 12, but it remains *not recommended* for StorageGRID audit logs from version >=12.0.
+Thanks to our numerous contributors, starting with v0.2.3, SGAC may work - to an extent - with StorageGRID audit logs from version 12, but it remains *not recommended* for StorageGRID audit logs from version >=12.0.
 
 SGAC saved audit log data to `/data/out/sgac.json`. View the file (formatted version shown for easier viewing):
 
@@ -335,7 +335,7 @@ It is recommended to retain audit logs (for example, upload them to a WORM bucke
   - New: may survive encounters with StorageGRID audit log version 12
   - New: `--log-format`. Default: 12
   - New: `--validate-json`. Default: disabled
-  - New: captures UUID fiel from log version 12
+  - New: captures `UUID` field from log version 12
 
 - v0.2.2 (2021/12/26)
   - Strip existing JSON escapes from nested JSON in audit log before converting log to JSON in SGAC
