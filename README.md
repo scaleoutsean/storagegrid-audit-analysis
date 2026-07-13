@@ -23,16 +23,19 @@
 
 ## Run `sgac.py` and view its output
 
-**NOTE:** 
+**NOTE:**
 
 - users of StorageGRID 11.6 and above should check [audit log forwarding](https://scaleoutsean.github.io/2022/03/04/storagegrid-s3-select.html#storagegrid-log-forwarding) feature that appeared in 11.6. That link also explains why there's no SGAC for version 11.6 - you don't need to read and process logs - since 11.6 they can be [forwarded](https://docs.netapp.com/us-en/storagegrid-enable/tools-apps-guides/elk-instructions.html#instruction) to a syslog destination external to StorageGRID cluster.
-- post-11.6 versions of StorageGRID may have new or modified log entries which could easily break this script, so for >=11.6 it's recommended to use the built-in forwarding over this script
+- post-11.6 versions of StorageGRID may have new or modified log entries which could easily break this script, so for >=11.6 it's recommended to use the built-in forwarding over this script.
+- StorageGRID 12 dropped `CBID` (it now defaults to `0x0...`), and 12.0 documentation fails to mention it. Do not rely on CBID with StorageGRID 12.0+. Use `UUID` instead.
 
 Users of StorageGRID 11 (especially 11.0 to 11.5) can download StorageGRID 11 audit log file and convert it to JSON documents (one per event) like so:
 
-```shell
-./sgac.py /data/in/audit.log /data/out/sgac.json
+```sh
+./sgac.py /data/in/audit.log /data/out/sgac.json --log-format 11 --ignore-errors --validate-json
 ```
+
+Thanks to our numerous contributors, starting with v0.2.3 SGAC may work - to an extent - with StorageGRID audit logs from version 12, but it remains *not recommended* for StorageGRID audit logs from version >=12.0.
 
 SGAC saved audit log data to `/data/out/sgac.json`. View the file (formatted version shown for easier viewing):
 
@@ -140,11 +143,18 @@ Example: finding successful downloads of an object from a specific IP address:
 
 No tuning has been done whatsoever, because it hasn't been necessary.
 
-sgac.py goes through audit log at 1.8 MB/s using one CPU core. This allows it to process a 2 GB audit log file in less than 20 minutes. If we were to split the input file, we could complete the job in less than 5 minutes.
+`sgac.py` goes through audit log at 1.8 MB/s using one CPU core. This allows it to process a 2 GB audit log file in less than 20 minutes. If we were to split the input file in four parts and use 4 single core instances of SGAC, we could complete the job in roughly 5 minutes.
 
 ## Additional information about StorageGRID audit log
 
 ### How to get StorageGRID audit log
+
+#### v12 
+
+- As StorageGRID Administrator, go to **Support** > **Log collection**, pick **Admin Node**, **Audit log** type and select a time interval
+- You can also use StorageGRID Management API v4 (`GET /grid/logs`) to download gzipped archive file with audit.log
+
+#### v11
 
 Links in this section lead to the official NetApp StorageGRID documentation (v11.5, mostly) to avoid repeating what's already in the manual.
 
@@ -153,7 +163,7 @@ Links in this section lead to the official NetApp StorageGRID documentation (v11
 3. Decompress log file(s) you've downloaded (.tar.gz); you should always download compressed audit log files because they don't change)
 4. Run SGAC to convert the uncompressed log file(s) to JSON
 
-### Accessing audit logs
+##### Accessing audit logs
 
 The approach is simple - configure an Admin node (Primary, or Backup, or both) to export audit logs via a read-only NFSv3 share (see the StorageGRID documentation - you need to login to one of admin nodes, enter the StorageGRID container and run a Ruby based configuration utility).
 
@@ -229,7 +239,7 @@ Links in here are links to the official StorageGRID documentation pages (v11.5 a
 
 ### What if I'm just interested in S3 PUT/GET/DELETE to determine top users and such
 
-Check out audit-explain, it may be sufficient for you. But with SGAC, you can add this in Python or (much easier) create such reports using Elastic or a database.
+Check out audit-explain, it may be sufficient for you. But with SGAC, you can add this in Python or (much easier) create such reports using Elasticsearch or a database.
 
 Some keys/fields of interest:
 
@@ -239,6 +249,7 @@ Some keys/fields of interest:
 - SHEA - S3 HEAD
 - SUPD - S3 Update (e.g. Metadata)
 - CSIZ - Content Size (example for StorageGRID [S3 GET](https://docs.netapp.com/sgws-115/index.jsp?topic=%2Fcom.netapp.doc.sg-audit%2FGUID-223B2822-4053-4913-8B54-5D01E4186CC6.html))
+- CBID|UUID - object ID in v11 and v12, respectively
 
 If Cloud Tiering is enabled and used you'd have the following SGET-equivalent traffic:
 
@@ -246,17 +257,16 @@ If Cloud Tiering is enabled and used you'd have the following SGET-equivalent tr
 - ARCT - Archive Retrieve (Cloud Tier) - basically ingress (similar to SPUT in terms of network cost)
 - SPOS - S3 POST is used to restore object from AWS Glacier storage to a Cloud Storage Pool
 
-There are also Swift entries but barely anyone uses it, so click on the audit-sum link above to see about Swift.
-
 ### Is there a list of all fields/keys for StorageGRID logs
 
-See the official documentation. I'm not aware of any omissions.
+See the official documentation.
 
 ### How can one ensure that no audit log file is deleted before it's copied out of Admin Node
 
 - Admin Node requires [200 GB space for audit logs](https://docs.netapp.com/sgws-115/index.jsp?topic=%2Fcom.netapp.doc.sg-install-rhel%2FGUID-8A777F78-E21D-4E4F-AF1A-DBD432E6D030.html)
 - Every day logs are [rotated and compressed](https://docs.netapp.com/sgws-115/index.jsp?topic=%2Fcom.netapp.doc.sg-audit%2FGUID-33B77138-D408-4D4F-9994-D2E8C3101FF2.html), so assuming 20 GB of log files per day, one has days to get the compressed log file out before it's deleted. The NetApp Support site has a KB about expanding the space for logs.
 - You could use NetApp XCP to copy files to another share or CloudSync to copy them from NFS to S3 (yes, you *can* copy audit logs to a StorageGRID bucket, but that kind of defeats the purpose for certain things such as compliance)
+  - Update (2026): of course, this copying to own S3 bucket is exactly the "feature" that SG later implemented. Again, I would not use that if I needed logs for SIEM or compliance.
 
 ### Sample audit-explain output
 
@@ -320,6 +330,12 @@ Check open issues to see if there's anything noteworthy.
 It is recommended to retain audit logs (for example, upload them to a WORM bucket) and, if you use them for something important, randomly sample JSON data and make sure JSON output corresponds to the original audit log file values.
 
 ## Change Log
+
+- v0.2.3 (2026/07/13)
+  - New: may survive encounters with StorageGRID audit log version 12
+  - New: `--log-format`. Default: 12
+  - New: `--validate-json`. Default: disabled
+  - New: captures UUID fiel from log version 12
 
 - v0.2.2 (2021/12/26)
   - Strip existing JSON escapes from nested JSON in audit log before converting log to JSON in SGAC
