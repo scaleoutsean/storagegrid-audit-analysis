@@ -6,9 +6,12 @@
   - [Run `sgac.py` and view its output](#run-sgacpy-and-view-its-output)
     - [What to do with SGAC output](#what-to-do-with-sgac-output)
     - [SGAC performance](#sgac-performance)
+  - [Parse optional access logs with Logstash](#parse-optional-access-logs-with-logstash)
   - [Additional information about StorageGRID audit log](#additional-information-about-storagegrid-audit-log)
     - [How to get StorageGRID audit log](#how-to-get-storagegrid-audit-log)
-    - [Accessing audit logs](#accessing-audit-logs)
+      - [v12](#v12)
+      - [v11](#v11)
+        - [Accessing audit logs](#accessing-audit-logs)
     - [Sample StorageGRID audit log entry for S3 PUT](#sample-storagegrid-audit-log-entry-for-s3-put)
     - [How to read audit messages](#how-to-read-audit-messages)
     - [What if I'm just interested in S3 PUT/GET/DELETE to determine top users and such](#what-if-im-just-interested-in-s3-putgetdelete-to-determine-top-users-and-such)
@@ -27,15 +30,15 @@
 
 - users of StorageGRID 11.6 and above should check [audit log forwarding](https://scaleoutsean.github.io/2022/03/04/storagegrid-s3-select.html#storagegrid-log-forwarding) feature that appeared in 11.6. That link also explains why there's no SGAC for version 11.6 - you don't need to read and process logs - since 11.6 they can be [forwarded](https://docs.netapp.com/us-en/storagegrid-enable/tools-apps-guides/elk-instructions.html#instruction) to a syslog destination external to StorageGRID cluster.
 - post-11.6 versions of StorageGRID may have new or modified log entries which could easily break this script, so for >=11.6 it's recommended to use the built-in forwarding over this script.
-- StorageGRID 12 dropped `CBID` (it now defaults to `0x0...`), and 12.0 documentation fails to mention it. Do not rely on CBID with StorageGRID 12.0+. Use `UUID` instead.
+- StorageGRID 12 dropped `CBID` (it now defaults to `0x0...`), and 12.0 and 12.1 documentation fails to mention that. Do not rely on CBID with StorageGRID 12.0+. Use `UUID` instead. There are other undocumented fields (as of 12.1).
 
-Users of StorageGRID 11 (especially 11.0 to 11.5) can download StorageGRID 11 audit log file and convert it to JSON documents (one per event) like so:
+Users of StorageGRID 11 (especially 11.0 to 11.5) can download StorageGRID 11 audit log file and convert it to JSONL documents (one per event) like so:
 
 ```sh
 ./sgac.py /data/in/audit.log /data/out/sgac.json --log-format 11 --ignore-errors --validate-json
 ```
 
-Thanks to our numerous contributors, starting with v0.2.3, SGAC may work - to an extent - with StorageGRID audit logs from version 12, but it remains *not recommended* for StorageGRID audit logs from version >=12.0.
+Thanks to our numerous contributors, starting with v0.2.3, SGAC may work - to an extent - with StorageGRID audit logs from versions 12, but it remains *not recommended* for StorageGRID audit logs from version >=12.0.
 
 SGAC saved audit log data to `/data/out/sgac.json`. View the file (formatted version shown for easier viewing):
 
@@ -145,11 +148,36 @@ No tuning has been done whatsoever, because it hasn't been necessary.
 
 `sgac.py` goes through audit log at 1.8 MB/s using one CPU core. This allows it to process a 2 GB audit log file in less than 20 minutes. If we were to split the input file in four parts and use 4 single core instances of SGAC, we could complete the job in roughly 5 minutes.
 
+## Parse optional access logs with Logstash
+
+StorageGRID can forward NGINX access logs alongside audit messages. The prefixes
+`endpoint:` and `mgmt:` identify S3 endpoint and management API access logs,
+respectively. Use [logstash/storagegrid-access.conf](logstash/storagegrid-access.conf)
+as a filter recipe, replacing its `stdin` and `stdout` plugins with the input and
+SIEM output used by your Logstash deployment.
+
+The endpoint pattern extracts `syslog_ts`, `node`, `time`, `remote_addr`,
+`status`, `bytes_sent`, `request_length`, `request_time`, `endpoint_id`,
+`upstream_addr`, `request`, and `http_host`. The management pattern extracts the
+same common fields plus `session_id`, `user_agent`, and `http_referer`. The
+`remote_addr` pattern also accepts StorageGRID's `unix:` value for internal
+requests. Numeric fields are converted to integer or floating-point values.
+
+Test the recipe with Docker and a captured log file:
+
+```sh
+./logstash/test-storagegrid-access.sh ./logstash/endpoint-access-log-sample.log
+```
+
+For the included sample, unrelated messages are dropped by this access-log pipeline, while malformed access rows retain a `_storagegrid_endpoint_grok_failure` or `_storagegrid_mgmt_grok_failure` tag.
+
+When a mixed file is passed to `sgac.py`, recognized `endpoint:` and `mgmt:` rows are skipped before audit parsing and included in the final skipped count.
+
 ## Additional information about StorageGRID audit log
 
 ### How to get StorageGRID audit log
 
-#### v12 
+#### v12
 
 - As StorageGRID Administrator, go to **Support** > **Log collection**, pick **Admin Node**, **Audit log** type and select a time interval
 - You can also use StorageGRID Management API v4 (`GET /grid/logs`) to download gzipped archive file with audit.log
@@ -257,6 +285,10 @@ If Cloud Tiering is enabled and used you'd have the following SGET-equivalent tr
 - ARCT - Archive Retrieve (Cloud Tier) - basically ingress (similar to SPUT in terms of network cost)
 - SPOS - S3 POST is used to restore object from AWS Glacier storage to a Cloud Storage Pool
 
+If Cloud Storage Pools are used, that will be under regular ILM:
+
+- ORLM
+
 ### Is there a list of all fields/keys for StorageGRID logs
 
 See the official documentation.
@@ -330,6 +362,10 @@ Check open issues to see if there's anything noteworthy.
 It is recommended to retain audit logs (for example, upload them to a WORM bucket) and, if you use them for something important, randomly sample JSON data and make sure JSON output corresponds to the original audit log file values.
 
 ## Change Log
+
+- v0.2.4 (2026/09/14)
+  - Changed: skip non-Audit log messages from StorageGRID log in case access and management log entries are included the file (previously parsing those lines would simply fail, causing no harm)
+  - New: add simple access log parser for out-of-scope access logs (generated and potentially logged by NGINX S3 API gateway(s)). Potentially useful when forwarding from syslog server to SIEM, as here we don't do anything with them
 
 - v0.2.3 (2026/07/13)
   - New: may survive encounters with StorageGRID audit log version 12

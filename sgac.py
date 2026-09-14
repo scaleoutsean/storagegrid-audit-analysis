@@ -14,8 +14,13 @@ import argparse
 import json
 import regex as re
 
+ACCESS_LOG_RE = re.compile(r'^\S+\s+\S+\s+(?:endpoint|mgmt):\s')
+
 
 def process_line(line,row_number):
+    if ACCESS_LOG_RE.match(line):
+        return None
+
     new_line = re.sub(r'\([a-zA-Z0-9_]*\)', '', line)
     s = re.split(" ", new_line, 1)
     if args.log_format == 12:
@@ -119,11 +124,16 @@ args = parser.parse_args()
 
 row_number = 0
 unprocessed_lines = 0
+parsed_count = 0
+skipped_count = 0
 with open(args.destination_file, 'w') as json_file:
     with open(args.source_file, "r") as f:
         for l in f:
             row_number    = row_number + 1
             sgac_json     = process_line(l, row_number)
+            if sgac_json is None:
+                skipped_count = skipped_count + 1
+                continue
             # if sgac_json is empty, skip the line and continue processing the file
             if not sgac_json:
                 unprocessed_lines = unprocessed_lines + 1
@@ -131,6 +141,8 @@ with open(args.destination_file, 'w') as json_file:
             sgac_json_fix = fix_line(sgac_json)
             json.dump(sgac_json_fix, json_file)
             json_file.write('\n')
+            parsed_count = parsed_count + 1
         print("Total lines read from file", args.source_file, ":", row_number)
-        print("Number of lines successfully processed:", row_number - unprocessed_lines)
+        print("Number of audit lines successfully processed:", parsed_count)
+        print("Number of access log lines skipped:", skipped_count)
         print("Number of unprocessed lines:", unprocessed_lines)
