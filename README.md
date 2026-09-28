@@ -6,7 +6,7 @@ Due to a poor ROI on time invested, starting from v0.3 SGAC is shared as a binar
 | Utility | Status |
 | :-----  | :----- |
 | **sgac** (Go) | Binary-only releases |
-| sgac.py | Find the utility and docs in [last Python release](https://github.com/scaleoutsean/storagegrid-audit-analysis/releases/tag/v0.2.4) | 
+| sgac.py | Find the utility and docs in [last Python release](https://github.com/scaleoutsean/storagegrid-audit-analysis/releases/tag/v0.2.4) |
 
 ## Usage
 
@@ -51,7 +51,7 @@ An output path that does not end in `.parquet` is treated as a Parquet dataset d
   --input audit.log \
   --output ./audit-parquet \
   --format parquet \
-  --prefix tenantid \
+  --prefix sacc \
   --layout prefix-first \
   --log-format 12 \
   --ignore-errors
@@ -61,27 +61,34 @@ Default layout:
 
 ```text
 date=YYYY-MM-DD/part-<timestamp>-<random>.parquet
-date=YYYY-MM-DD/accountid=<id>/part-<timestamp>-<random>.parquet
-date=YYYY-MM-DD/tenantid=<id>/part-<timestamp>-<random>.parquet
+date=YYYY-MM-DD/s3ai=<request-account-id>/part-<timestamp>-<random>.parquet
+date=YYYY-MM-DD/sbai=<bucket-owner-account-id>/part-<timestamp>-<random>.parquet
+date=YYYY-MM-DD/sacc=<request-account-name>/part-<timestamp>-<random>.parquet
+date=YYYY-MM-DD/sbac=<bucket-owner-account-name>/part-<timestamp>-<random>.parquet
 ```
 
 With `--layout prefix-first`:
 
 ```text
-accountid=<id>/date=YYYY-MM-DD/part-<timestamp>-<random>.parquet
-tenantid=<id>/date=YYYY-MM-DD/part-<timestamp>-<random>.parquet
+s3ai=<request-account-id>/date=YYYY-MM-DD/part-<timestamp>-<random>.parquet
+sbai=<bucket-owner-account-id>/date=YYYY-MM-DD/part-<timestamp>-<random>.parquet
+sacc=<request-account-name>/date=YYYY-MM-DD/part-<timestamp>-<random>.parquet
+sbac=<bucket-owner-account-name>/date=YYYY-MM-DD/part-<timestamp>-<random>.parquet
 ```
 
-`prefix-first` is useful when tenant or account prefixes are used as object-store access-control boundaries. `date-first` is the default for centralized analytics.
+`prefix-first` puts the selected source-field value at the root, which can help when designing object-store access-control boundaries. `date-first` is the default for centralized analytics. A prefix is only an event's partition key; it does not prove tenant isolation. Events without that field go under `!missing`, including ILM records such as `ORLM`. Do not grant tenant access to `!missing` without reviewing its contents.
 
 Options:
 
-- `--prefix none|accountid|tenantid` selects optional partitioning. The default is `none`.
-- `--layout date-first|prefix-first` controls partition order. `prefix-first` requires `--prefix accountid` or `--prefix tenantid`.
-- `--prefix accountid` uses `S3AI`, falling back to `SBAI`.
-- `--prefix tenantid` uses the `SACC` tenant/account name, falling back to `SBAC`.
-- Missing prefix values are written under `unknown` and counted in the final statistics.
-- Partition dates use `ATIM` as a UTC microsecond Unix timestamp, falling back to `Timestamp`.
+- `--prefix none|s3ai|sbai|sacc|sbac` selects one exact source field for optional partitioning. The default is `none`.
+- `--layout date-first|prefix-first` controls partition order. `prefix-first` requires a non-`none` prefix.
+- `s3ai` is the tenant account ID of the user who sent the S3 request.
+- `sbai` is the tenant account ID that owns the target bucket.
+- `sacc` is the request sender's tenant account name; it is empty for anonymous requests.
+- `sbac` is the target bucket owner's tenant account name.
+- Missing or empty prefix values are written under `!missing` and counted in the final statistics.
+- Values containing characters outside `A-Z`, `a-z`, `0-9`, `.`, `_`, and `-` are encoded as `~` followed by unpadded base64url of the original UTF-8 value. For example, `tenant one` becomes `~dGVuYW50IG9uZQ`. Safe values such as numeric IDs and `acme` remain readable. This encoding is reversible and avoids collisions from replacing characters with underscores.
+- Partition dates use required `ATIM`, a UTC microsecond Unix timestamp. Parquet conversion fails if `ATIM` is absent or invalid; it does not substitute the source-line timestamp.
 - Part filenames include a timestamp and random suffix so repeated conversions do not overwrite earlier files.
 
 SGAC writes plain Parquet files only. It does not select or manage a lakehouse table format such as Delta, Iceberg, or Hudi.
@@ -112,7 +119,7 @@ Partitioned dataset:
   --input audit.log \
   --output s3://audit-results/logs \
   --format parquet \
-  --prefix tenantid \
+  --prefix sacc \
   --layout prefix-first \
   --endpoint https://storagegrid.example.com:10443 \
   --force-path-style \
@@ -156,7 +163,7 @@ The check interval is configurable for workloads with unusually large records or
 
 ## Parsed audit data
 
-The parser supports StorageGRID log formats 11 and 12. The default is format 12.
+The parser supports StorageGRID log formats 11 and 12. The default is format 12. Every parsed audit entry must contain a valid integer `ATIM` and a non-empty `ATYP`; entries missing either are malformed for both JSONL and Parquet output.
 
 It:
 
@@ -172,26 +179,116 @@ Lines identified as `endpoint:` or `mgmt:` access logs are currently no-op branc
 
 Malformed or non-audit lines stop conversion by default. Use `--ignore-errors` to continue and count them as unprocessed lines.
 
+No `ATYP` event types are filtered from Parquet output. `s3-all.log` contains 576,660 lines: 263,634 audit entries, 251,524 endpoint access-log lines, and 61,502 management access-log lines. The access-log branches are skipped; all audit event types present in the file are retained. With `--ignore-errors`, malformed/non-audit lines that are not recognized access logs are counted as unprocessed.
+
+The following 17 `ATYP` values were observed in `s3-all.log`. Counts are specific to this sample, not an exhaustive StorageGRID event-type registry.
+
+| `ATYP` | Sample count | Meaning |
+| --- | ---: | --- |
+| `SGET` | 197,815 | S3 GET |
+| `ORLM` | 21,687 | Object Rules Met; ILM rule satisfied |
+| `SPUT` | 20,251 | S3 PUT |
+| `SDEL` | 17,920 | S3 DELETE |
+| `SHEA` | 3,971 | S3 HEAD |
+| `MGAU` | 656 | Management audit message |
+| `SPOS` | 534 | S3 POST |
+| `OVWR` | 421 | Object Overwrite |
+| `ETAF` | 146 | Security Authentication Failed |
+| `ASRO` | 103 | Observed in sample; retained without interpretation |
+| `SYSU` | 44 | Node Start |
+| `SYST` | 28 | Node Stopping |
+| `SYSD` | 28 | Node Stop |
+| `LKCU` | 23 | Observed in sample; retained without interpretation |
+| `IDEL` | 3 | ILM Initiated Delete |
+| `SUPD` | 2 | S3 metadata or bucket compliance update |
+| `EBDL` | 2 | Observed in sample; retained without interpretation |
+
+Every audit record is retained regardless of type. S3 request types carry requester/bucket-owner fields; ILM events such as `ORLM` instead carry fields such as `RULE`, `STAT`, `PATH`, `LOCS`, `UUID`, and `CSIZ`. Identity columns are therefore null for those events rather than populated from unrelated fields.
+
 ## Parquet schema
 
-Parquet contains a stable analytical projection plus the complete parsed event in `raw_json`:
+Parquet contains a typed analytical projection plus the complete parsed event in `raw_json`. Optional source fields become Parquet `NULL` when absent. Empty source values remain empty strings; they are not substituted from another field.
 
 | Column | Type | Source |
 | --- | --- | --- |
-| `timestamp` | string | `Timestamp` |
-| `atim` | int64 | `ATIM` |
-| `atyp` | string | `ATYP` |
-| `amid` | string | `AMID` |
-| `rslt` | string | `RSLT` |
-| `account_id` | string | `S3AI`, fallback `SBAI` |
-| `tenant_id` | string | `SACC`, fallback `SBAC` (usually tenant/account name) |
-| `bucket` | string | `S3BK` |
-| `object_key` | string | `S3KY` |
-| `client_ip` | string | `SAIP`, fallback `MSIP` |
-| `size` | int64 | `CSIZ` |
+| `source_timestamp` | string | First timestamp token on the input line; may be the syslog timestamp |
+| `atim` | int64, required | `ATIM`, event time in microseconds since Unix epoch |
+| `atyp` | string, required | `ATYP`, event type |
+| `amid` | nullable string | `AMID` |
+| `rslt` | nullable string | `RSLT` |
+| `request_account_id` | nullable string | `S3AI`, request sender's tenant account ID |
+| `bucket_owner_account_id` | nullable string | `SBAI`, target bucket owner's tenant account ID |
+| `request_account_name` | nullable string | `SACC`, request sender's tenant account name |
+| `bucket_owner_account_name` | nullable string | `SBAC`, target bucket owner's tenant account name |
+| `bucket` | nullable string | `S3BK` |
+| `object_key` | nullable string | `S3KY`; not present on bucket-only requests |
+| `client_ip` | nullable string | `SAIP`, S3 request sender address |
+| `management_client_ip` | nullable string | `MSIP`, management request client address |
+| `size` | nullable int64 | `CSIZ`; absence remains `NULL`, not zero |
+| `uuid` | nullable string | `UUID` |
+| `ilm_rule` | nullable string | `RULE` |
+| `ilm_status` | nullable string | `STAT` |
+| `object_path` | nullable string | `PATH` |
+| `locations` | nullable string | `LOCS` |
 | `raw_json` | string | Complete parsed audit record |
 
-The schema is intentionally small and does not discard the other audit fields: they remain available inside `raw_json` for later queries and schema expansion.
+`S3AI`/`SACC` describe the request sender. `SBAI`/`SBAC` describe the target bucket owner and can differ for cross-account access. `SAIP` and `MSIP` belong to different event families and are not merged. Other source fields remain available in `raw_json`; the typed columns are a convenience projection, not a field whitelist.
+
+## Migrating Parquet schemas
+
+Because each Parquet row stores its parsed audit event in `raw_json`, DuckDB can export those events or build a new projection without the original audit files.
+
+Export one standalone JSON object per line to an intermediate file:
+
+```sql
+COPY (
+  SELECT raw_json
+  FROM read_parquet(
+    's3://audit-results/logs/**/*.parquet',
+    hive_partitioning = true
+  )
+)
+TO '/data/sgac-events.jsonl'
+(FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+```
+
+The single unquoted column contains the JSON text itself. The resulting JSONL can be reparsed with `read_json_auto` or another JSONL tool.
+
+Alternatively, extract the fields needed by a revised schema and write new Parquet directly:
+
+```sql
+COPY (
+  SELECT
+    json_extract_string(raw_json, '$.Timestamp') AS source_timestamp,
+    TRY_CAST(json_extract_string(raw_json, '$.ATIM') AS BIGINT) AS atim,
+    json_extract_string(raw_json, '$.ATYP') AS atyp,
+    json_extract_string(raw_json, '$.AMID') AS amid,
+    json_extract_string(raw_json, '$.RSLT') AS rslt,
+    json_extract_string(raw_json, '$.S3AI') AS request_account_id,
+    json_extract_string(raw_json, '$.SBAI') AS bucket_owner_account_id,
+    json_extract_string(raw_json, '$.SACC') AS request_account_name,
+    json_extract_string(raw_json, '$.SBAC') AS bucket_owner_account_name,
+    json_extract_string(raw_json, '$.S3BK') AS bucket,
+    json_extract_string(raw_json, '$.S3KY') AS object_key,
+    json_extract_string(raw_json, '$.SAIP') AS client_ip,
+    json_extract_string(raw_json, '$.MSIP') AS management_client_ip,
+    TRY_CAST(json_extract_string(raw_json, '$.CSIZ') AS BIGINT) AS size,
+    json_extract_string(raw_json, '$.UUID') AS uuid,
+    json_extract_string(raw_json, '$.RULE') AS ilm_rule,
+    json_extract_string(raw_json, '$.STAT') AS ilm_status,
+    json_extract_string(raw_json, '$.PATH') AS object_path,
+    json_extract_string(raw_json, '$.LOCS') AS locations,
+    raw_json
+  FROM read_parquet(
+    's3://audit-results/logs/**/*.parquet',
+    hive_partitioning = true
+  )
+)
+TO '/data/sgac-schema-vnext.parquet'
+(FORMAT PARQUET, COMPRESSION ZSTD);
+```
+
+`raw_json` is the complete **parsed** event, not the original source line. The parser intentionally omits `CBID` for log format 12 and normalizes selected escaped fields. Keep the original audit logs if future migrations may need to recover omitted fields, change parsing behavior, or reproduce the original source text.
 
 ## Query examples
 
@@ -218,11 +315,11 @@ SELECT COUNT(*)
 FROM read_parquet('s3://audit-results/logs/**/*.parquet', hive_partitioning = true);
 ```
 
-For physically isolated tenant data, query only that tenant's prefix. This is useful when object-store permissions are assigned per tenant:
+For data partitioned by request-sender account name, query only that exact `SACC` prefix. Use `SBAC` instead when the intended grouping is the target bucket owner:
 
 ```sql
 SELECT COUNT(*)
-FROM read_parquet('s3://audit-results/logs/tenantid=acme/**/*.parquet', hive_partitioning = true);
+FROM read_parquet('s3://audit-results/logs/sacc=acme/**/*.parquet', hive_partitioning = true);
 ```
 
 Replace the example timestamps below with the desired `ATIM` range in microseconds since the Unix epoch. The end of the range is exclusive.
@@ -234,7 +331,7 @@ Find unique client IPs that accessed one object for a tenant. Remove the `object
 ```sql
 SELECT DISTINCT client_ip
 FROM read_parquet(
-  's3://audit-results/logs/tenantid=acme/**/*.parquet',
+  's3://audit-results/logs/sacc=acme/**/*.parquet',
   hive_partitioning = true
 )
 WHERE atyp IN ('SGET', 'SPUT', 'SDEL')
@@ -320,6 +417,9 @@ Each conversion reports:
 The Go converter does not currently include a built-in syslog listener or query/report commands.
 
 ## Change Log
+
+- v0.3.1 (2026/09/28)
+  - Changed: Parquet schema for accuracy and usability. Instructions for converting old to new Parquet files are included in README.md
 
 - v0.3.0 (2026/09/20)
   - Changed: uses Go. The source code is no longer distributed to decrease maintainer's effort
