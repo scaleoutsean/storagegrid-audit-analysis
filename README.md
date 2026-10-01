@@ -13,10 +13,12 @@ Due to a poor ROI on time invested, starting from v0.3 SGAC is shared as a binar
 The command is:
 
 ```sh
-./sgac convert --input <input> --output <output> [options]
+./sgac convert --input <input> --output <output> [--type audit|access] [options]
 ```
 
 Input may be a local file or `-` for stdin. JSONL may be written to a local file or `-` for stdout. Parquet output must use a file or directory path.
+
+`--type audit` is the default and keeps the S3/StorageGRID audit behavior described below. Use `--type access` to parse only `endpoint:` access log rows into a separate schema. In either mode, the other record types are skipped; `mgmt:` parsing is not implemented.
 
 ### JSONL
 
@@ -127,6 +129,19 @@ Partitioned dataset:
   --ignore-errors
 ```
 
+Endpoint access dataset:
+
+```sh
+./sgac convert \
+  --input mixed-syslog.log \
+  --output s3://audit-results/endpoint-access \
+  --type access \
+  --format parquet \
+  --endpoint https://storagegrid.example.com:10443 \
+  --force-path-style \
+  --ignore-errors
+```
+
 Parquet files are first written to a temporary local staging directory. Files are uploaded only after they are closed successfully. S3 dataset uploads preserve the local relative partition paths.
 
 S3 settings may be provided as flags or environment variables:
@@ -175,35 +190,37 @@ It:
 - removes `CBID` from format 12 output
 - normalizes escaped `SRCF`, `MRBD`, and `MRSP` values to match the existing SGAC behavior
 
-Lines identified as `endpoint:` or `mgmt:` access logs are currently no-op branches. They are skipped and counted; they are not parsed into the output. Access-log parsing remains a separate Logstash concern for now.
+In the default `--type audit` mode, `endpoint:` and `mgmt:` access rows are skipped and counted. With `--type access`, endpoint rows are parsed instead; audit and `mgmt:` rows are skipped. Management access-log parsing remains out of scope.
+
+On the refreshed `s3-all.log`, access mode parsed 253,457 endpoint rows, skipped 332,091 audit/management rows, and found no malformed endpoint rows. Of the endpoint rows, 16,490 have HTTP status 400 or greater; status alone does not explain the failure cause.
 
 Malformed or non-audit lines stop conversion by default. Use `--ignore-errors` to continue and count them as unprocessed lines.
 
-No `ATYP` event types are filtered from Parquet output. `s3-all.log` contains 576,660 lines: 263,634 audit entries, 251,524 endpoint access-log lines, and 61,502 management access-log lines. The access-log branches are skipped; all audit event types present in the file are retained. With `--ignore-errors`, malformed/non-audit lines that are not recognized access logs are counted as unprocessed.
+No `ATYP` event types are filtered from Parquet output. The refreshed `s3-all.log` contains 585,548 lines: 265,320 audit entries, 253,457 endpoint access-log lines, and 66,771 management access-log lines. In default `--type audit` mode, endpoint and management lines are skipped; all audit event types present in the file are retained. With `--ignore-errors`, malformed lines in the selected type are counted as unprocessed.
 
 The following 17 `ATYP` values were observed in `s3-all.log`. Counts are specific to this sample, not an exhaustive StorageGRID event-type registry.
 
 | `ATYP` | Sample count | Meaning |
 | --- | ---: | --- |
-| `SGET` | 197,815 | S3 GET |
-| `ORLM` | 21,687 | Object Rules Met; ILM rule satisfied |
-| `SPUT` | 20,251 | S3 PUT |
-| `SDEL` | 17,920 | S3 DELETE |
-| `SHEA` | 3,971 | S3 HEAD |
-| `MGAU` | 656 | Management audit message |
-| `SPOS` | 534 | S3 POST |
+| `SGET` | 198,859 | S3 GET |
+| `ORLM` | 21,820 | Object Rules Met; ILM rule satisfied |
+| `SPUT` | 20,350 | S3 PUT |
+| `SDEL` | 17,999 | S3 DELETE |
+| `SHEA` | 4,074 | S3 HEAD |
+| `MGAU` | 801 | Management audit message |
+| `SPOS` | 537 | S3 POST |
 | `OVWR` | 421 | Object Overwrite |
+| `ASRO` | 147 | Observed in sample; retained without interpretation |
 | `ETAF` | 146 | Security Authentication Failed |
-| `ASRO` | 103 | Observed in sample; retained without interpretation |
-| `SYSU` | 44 | Node Start |
-| `SYST` | 28 | Node Stopping |
-| `SYSD` | 28 | Node Stop |
+| `SYSU` | 56 | Node Start |
+| `SYST` | 40 | Node Stopping |
+| `SYSD` | 40 | Node Stop |
 | `LKCU` | 23 | Observed in sample; retained without interpretation |
 | `IDEL` | 3 | ILM Initiated Delete |
 | `SUPD` | 2 | S3 metadata or bucket compliance update |
 | `EBDL` | 2 | Observed in sample; retained without interpretation |
 
-Every audit record is retained regardless of type. S3 request types carry requester/bucket-owner fields; ILM events such as `ORLM` instead carry fields such as `RULE`, `STAT`, `PATH`, `LOCS`, `UUID`, and `CSIZ`. Identity columns are therefore null for those events rather than populated from unrelated fields.
+Every audit record is retained in `--type audit` regardless of `ATYP`. S3 request types carry requester/bucket-owner fields; ILM events such as `ORLM` instead carry fields such as `RULE`, `STAT`, `PATH`, `LOCS`, `UUID`, and `CSIZ`. Identity columns are therefore null for those events rather than populated from unrelated fields.
 
 ## Parquet schema
 
@@ -233,6 +250,39 @@ Parquet contains a typed analytical projection plus the complete parsed event in
 | `raw_json` | string | Complete parsed audit record |
 
 `S3AI`/`SACC` describe the request sender. `SBAI`/`SBAC` describe the target bucket owner and can differ for cross-account access. `SAIP` and `MSIP` belong to different event families and are not merged. Other source fields remain available in `raw_json`; the typed columns are a convenience projection, not a field whitelist.
+
+### Endpoint access schema (`--type access`)
+
+Endpoint access output uses a separate schema and is not mixed with audit rows. Directory Parquet output is partitioned by UTC date from `access_timestamp`; audit identity `--prefix` values are not supported because endpoint rows do not contain an authoritative tenant/account identity.
+
+| Column | Type | Source |
+| --- | --- | --- |
+| `syslog_timestamp` | string | Timestamp at the start of the source line |
+| `node` | string | StorageGRID node name |
+| `access_timestamp` | string | Timestamp inside the `endpoint:` record |
+| `remote_addr` | string | Client address as logged by the endpoint |
+| `status` | int64 | HTTP status |
+| `bytes_sent` | int64 | Response bytes logged by the endpoint |
+| `request_length` | int64 | Request length logged by the endpoint |
+| `request_time` | float64 | Endpoint request duration in seconds |
+| `endpoint_id` | nullable string | Endpoint UUID; absent before endpoint selection |
+| `upstream_addr` | nullable string | Backend StorageGRID address; absent when no upstream was selected |
+| `request` | string | Request line, including path and query string |
+| `http_host` | nullable string | HTTP Host value; `-` is represented as `NULL` |
+| `raw_line` | string | Complete original endpoint log line |
+
+For mixed log files, access mode skips audit and management rows. Malformed endpoint rows fail by default or are counted as unprocessed with `--ignore-errors`. Request paths and query strings can contain sensitive data. `remote_addr` is the address recorded by StorageGRID and should not automatically be treated as the originating client when proxies/load balancers are involved. HTTP status alone does not identify why a request failed or prove an S3 key is stale.
+
+Example local conversion:
+
+```sh
+./sgac convert \
+  --input mixed-syslog.log \
+  --output ./endpoint-access \
+  --type access \
+  --format parquet \
+  --ignore-errors
+```
 
 ## Migrating Parquet schemas
 
@@ -364,7 +414,7 @@ Remove the `bucket` predicate for a global summary, or query a tenant prefix to 
 
 ### Failed operations
 
-Group unsuccessful operations by bucket, operation, client IP, and result code:
+Group unsuccessful S3 API operations by bucket, operation, client IP, and result code:
 
 ```sql
 SELECT
@@ -403,20 +453,79 @@ ORDER BY requests DESC;
 
 The `size` value for `SGET` is the logical content size recorded in the audit event. It is not necessarily wire-level network traffic after retries, encryption, protocol overhead, or range-request behavior.
 
+### Endpoint access log queries
+
+These examples use the separate dataset written with `--type access`:
+`s3://audit-results/endpoint-access/`. They use `access_timestamp` for a rolling 24-hour window. Query strings are omitted from the displayed path because they may contain sensitive parameters.
+
+#### Clients receiving failed responses in the last 24 hours
+
+This groups failed requests by client IP, status, and path. It includes 4xx responses such as 400/404/401 and 5xx responses; status 499 is also included if present.
+
+```sql
+WITH recent_failures AS (
+  SELECT
+    remote_addr,
+    status,
+    regexp_extract(request, '^[A-Z]+[ ]+([^? ]+)', 1) AS path
+  FROM read_parquet(
+    's3://audit-results/endpoint-access/**/*.parquet',
+    hive_partitioning = true
+  )
+  WHERE TRY_CAST(access_timestamp AS TIMESTAMPTZ) >= current_timestamp - INTERVAL '24 hours'
+    AND status >= 400
+    AND status < 600
+)
+SELECT remote_addr, status, path, COUNT(*) AS failed_requests
+FROM recent_failures
+GROUP BY remote_addr, status, path
+ORDER BY failed_requests DESC;
+```
+
+#### Locate endpoint or upstream nodes with elevated 5xx responses
+
+Compare HTTP Host, endpoint UUID, and selected upstream. This helps distinguish a problem concentrated on one endpoint or backend from errors spread across the service. Client-aborted 499 responses are not counted as server errors here.
+
+```sql
+WITH recent AS (
+  SELECT http_host, endpoint_id, upstream_addr, status, request_time
+  FROM read_parquet(
+    's3://audit-results/endpoint-access/**/*.parquet',
+    hive_partitioning = true
+  )
+  WHERE TRY_CAST(access_timestamp AS TIMESTAMPTZ) >= current_timestamp - INTERVAL '24 hours'
+)
+SELECT
+  COALESCE(http_host, '(unavailable)') AS http_host,
+  COALESCE(endpoint_id, '(unavailable)') AS endpoint_id,
+  COALESCE(upstream_addr, '(unavailable)') AS upstream_addr,
+  COUNT(*) AS requests,
+  COUNT_IF(status >= 500 AND status < 600) AS server_errors,
+  ROUND(100.0 * COUNT_IF(status >= 500 AND status < 600) / COUNT(*), 2) AS server_error_percent,
+  QUANTILE_CONT(request_time, 0.95) AS p95_request_time_seconds
+FROM recent
+GROUP BY http_host, endpoint_id, upstream_addr
+HAVING COUNT_IF(status >= 500 AND status < 600) > 0
+ORDER BY server_errors DESC;
+```
+
 ## Output statistics
 
 Each conversion reports:
 
 - total input lines
-- successfully parsed audit lines
-- skipped endpoint/mgmt access-log lines
+- successfully parsed records of the selected `--type`
+- lines of other record types skipped (`endpoint`/`mgmt` in audit mode; audit/`mgmt` in access mode)
 - unprocessed lines
-- missing partition-prefix values, when applicable
+- missing partition-prefix values in audit mode, when applicable
 - uploaded Parquet file count and byte count, for S3 output
 
 The Go converter does not currently include a built-in syslog listener or query/report commands.
 
 ## Change Log
+
+- v0.4.0 (2026/10/02)
+  - New: mode for StorageGRID access log parsing (requires StorageGRID access logs to be forwarded)
 
 - v0.3.1 (2026/09/28)
   - Changed: Parquet schema for accuracy and usability. Instructions for converting old to new Parquet files are included in README.md
