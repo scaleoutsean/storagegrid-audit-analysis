@@ -192,13 +192,9 @@ It:
 
 In the default `--type audit` mode, `endpoint:` and `mgmt:` access rows are skipped and counted. With `--type access`, endpoint rows are parsed instead; audit and `mgmt:` rows are skipped. Management access-log parsing remains out of scope.
 
-On the refreshed `s3-all.log`, access mode parsed 253,457 endpoint rows, skipped 332,091 audit/management rows, and found no malformed endpoint rows. Of the endpoint rows, 16,490 have HTTP status 400 or greater; status alone does not explain the failure cause.
-
 Malformed or non-audit lines stop conversion by default. Use `--ignore-errors` to continue and count them as unprocessed lines.
 
-No `ATYP` event types are filtered from Parquet output. The refreshed `s3-all.log` contains 585,548 lines: 265,320 audit entries, 253,457 endpoint access-log lines, and 66,771 management access-log lines. In default `--type audit` mode, endpoint and management lines are skipped; all audit event types present in the file are retained. With `--ignore-errors`, malformed lines in the selected type are counted as unprocessed.
-
-The following 17 `ATYP` values were observed in `s3-all.log`. Counts are specific to this sample, not an exhaustive StorageGRID event-type registry.
+The following 17 `ATYP` values were observed in the sample log files. Counts are specific to this sample, not an exhaustive StorageGRID event-type registry.
 
 | `ATYP` | Sample count | Meaning |
 | --- | ---: | --- |
