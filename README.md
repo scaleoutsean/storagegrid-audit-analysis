@@ -186,7 +186,7 @@ It:
 - finds and parses `[AUDT:...]` messages
 - removes StorageGRID field type suffixes such as `(CSTR)`, `(UI64)`, and `(FC32)`
 - converts ordinary numeric values to integers where possible
-- preserves `ATID`, `S3AI`, and `SBAI` as strings to avoid precision loss
+- preserves `ATID`, `S3AI`, `SBAI`, `VSID`, `DMRK`, and `SUSR` as strings
 - removes `CBID` from format 12 output
 - normalizes escaped `SRCF`, `MRBD`, and `MRSP` values to match the existing SGAC behavior
 
@@ -233,8 +233,11 @@ Parquet contains a typed analytical projection plus the complete parsed event in
 | `bucket_owner_account_id` | nullable string | `SBAI`, target bucket owner's tenant account ID |
 | `request_account_name` | nullable string | `SACC`, request sender's tenant account name |
 | `bucket_owner_account_name` | nullable string | `SBAC`, target bucket owner's tenant account name |
+| `request_user_urn` | nullable string | `SUSR`, request sender's user URN |
 | `bucket` | nullable string | `S3BK` |
 | `object_key` | nullable string | `S3KY`; not present on bucket-only requests |
+| `version_id` | nullable string | `VSID`, S3 object version ID |
+| `delete_marker_version_id` | nullable string | `DMRK`, newly created delete marker's version ID |
 | `client_ip` | nullable string | `SAIP`, S3 request sender address |
 | `management_client_ip` | nullable string | `MSIP`, management request client address |
 | `size` | nullable int64 | `CSIZ`; absence remains `NULL`, not zero |
@@ -245,7 +248,7 @@ Parquet contains a typed analytical projection plus the complete parsed event in
 | `locations` | nullable string | `LOCS` |
 | `raw_json` | string | Complete parsed audit record |
 
-`S3AI`/`SACC` describe the request sender. `SBAI`/`SBAC` describe the target bucket owner and can differ for cross-account access. `SAIP` and `MSIP` belong to different event families and are not merged. Other source fields remain available in `raw_json`; the typed columns are a convenience projection, not a field whitelist.
+`S3AI`/`SACC` describe the request sender. `SBAI`/`SBAC` describe the target bucket owner and can differ for cross-account access. `SAIP` and `MSIP` belong to different event families and are not merged. `UUID` is a StorageGRID object identifier, not an S3 version ID. `S3AK` in `raw_json` is a hashed access-key ID. Other source fields remain available in `raw_json`; the typed columns are a convenience projection, not a field whitelist. See [SCHEMA.md](SCHEMA.md) for historical schemas, migration, and ILM deletion interpretation.
 
 ### Endpoint access schema (`--type access`)
 
@@ -280,62 +283,6 @@ Example local conversion:
   --ignore-errors
 ```
 
-## Migrating Parquet schemas
-
-Because each Parquet row stores its parsed audit event in `raw_json`, DuckDB can export those events or build a new projection without the original audit files.
-
-Export one standalone JSON object per line to an intermediate file:
-
-```sql
-COPY (
-  SELECT raw_json
-  FROM read_parquet(
-    's3://audit-results/logs/**/*.parquet',
-    hive_partitioning = true
-  )
-)
-TO '/data/sgac-events.jsonl'
-(FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
-```
-
-The single unquoted column contains the JSON text itself. The resulting JSONL can be reparsed with `read_json_auto` or another JSONL tool.
-
-Alternatively, extract the fields needed by a revised schema and write new Parquet directly:
-
-```sql
-COPY (
-  SELECT
-    json_extract_string(raw_json, '$.Timestamp') AS source_timestamp,
-    TRY_CAST(json_extract_string(raw_json, '$.ATIM') AS BIGINT) AS atim,
-    json_extract_string(raw_json, '$.ATYP') AS atyp,
-    json_extract_string(raw_json, '$.AMID') AS amid,
-    json_extract_string(raw_json, '$.RSLT') AS rslt,
-    json_extract_string(raw_json, '$.S3AI') AS request_account_id,
-    json_extract_string(raw_json, '$.SBAI') AS bucket_owner_account_id,
-    json_extract_string(raw_json, '$.SACC') AS request_account_name,
-    json_extract_string(raw_json, '$.SBAC') AS bucket_owner_account_name,
-    json_extract_string(raw_json, '$.S3BK') AS bucket,
-    json_extract_string(raw_json, '$.S3KY') AS object_key,
-    json_extract_string(raw_json, '$.SAIP') AS client_ip,
-    json_extract_string(raw_json, '$.MSIP') AS management_client_ip,
-    TRY_CAST(json_extract_string(raw_json, '$.CSIZ') AS BIGINT) AS size,
-    json_extract_string(raw_json, '$.UUID') AS uuid,
-    json_extract_string(raw_json, '$.RULE') AS ilm_rule,
-    json_extract_string(raw_json, '$.STAT') AS ilm_status,
-    json_extract_string(raw_json, '$.PATH') AS object_path,
-    json_extract_string(raw_json, '$.LOCS') AS locations,
-    raw_json
-  FROM read_parquet(
-    's3://audit-results/logs/**/*.parquet',
-    hive_partitioning = true
-  )
-)
-TO '/data/sgac-schema-vnext.parquet'
-(FORMAT PARQUET, COMPRESSION ZSTD);
-```
-
-`raw_json` is the complete **parsed** event, not the original source line. The parser intentionally omits `CBID` for log format 12 and normalizes selected escaped fields. Keep the original audit logs if future migrations may need to recover omitted fields, change parsing behavior, or reproduce the original source text.
-
 ## Query examples
 
 The examples below use DuckDB and an S3-backed Parquet dataset. Configure the S3-compatible endpoint once for the DuckDB session; use your normal credential-chain or secret-management approach for credentials:
@@ -369,6 +316,26 @@ FROM read_parquet('s3://audit-results/logs/sacc=acme/**/*.parquet', hive_partiti
 ```
 
 Replace the example timestamps below with the desired `ATIM` range in microseconds since the Unix epoch. The end of the range is exclusive.
+
+### ILM-initiated deletes since a snapshot
+
+Search the complete dataset, including `!missing` partitions, for a base bucket. Replace the bucket name and timestamps with the snapshot and inventory cutoff times:
+
+```sql
+SELECT atim, object_path, version_id, delete_marker_version_id, uuid, ilm_rule, rslt
+FROM read_parquet(
+  's3://audit-results/logs/**/*.parquet',
+  hive_partitioning = true,
+  union_by_name = true
+)
+WHERE atyp = 'IDEL'
+  AND atim >= 1725148800000000
+  AND atim <  1727740800000000
+  AND (starts_with(object_path, 'customer-data/') OR object_path IS NULL OR object_path = '')
+ORDER BY atim;
+```
+
+Rows with missing paths are included for investigation and may belong to other buckets. Validate the `PATH` format, compare version IDs with snapshot metadata, and account for late or missing logs. Older files need backfilling for the new columns even when read with `union_by_name`. See [SCHEMA.md](SCHEMA.md#interpreting-ilm-deletes) for the conservative deletion assumption and migration details.
 
 ### Client IPs accessing an object
 
@@ -520,11 +487,21 @@ The Go converter does not currently include a built-in syslog listener or query/
 
 ## Change Log
 
+- v0.5.0-bbf5e21 (2026/11/25)
+  - Changed: improve table schema for more precise object tracking
+  - New: add SCHEMA.md document for tracking of schema changes
+
+- v0.4.2-3a7c829 (2026/11/12)
+  - Changed: 3rd party dependency updates (Go 1.27.4)
+
+- v0.4.1-5a6e0c0 (2026/10/26)
+  - 3rd party dependency updates (Go 1.27.3) and a documentation clarification
+
 - v0.4.0 (2026/10/02)
   - New: mode for StorageGRID access log parsing (requires StorageGRID access logs to be forwarded)
 
 - v0.3.1 (2026/09/28)
-  - Changed: Parquet schema for accuracy and usability. Instructions for converting old to new Parquet files are included in README.md
+  - Changed: Parquet schema for accuracy and usability. See SCHEMA.md for migration instructions.
 
 - v0.3.0 (2026/09/20)
   - Changed: uses Go. The source code is no longer distributed to decrease maintainer's effort
